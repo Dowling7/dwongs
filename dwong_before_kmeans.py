@@ -4,10 +4,13 @@ import awkward as ak
 import matplotlib.pyplot as plt
 import os,sys
 import math
-from sklearn.cluster import Birch#clustering
+from sklearn.cluster import KMeans
 from scipy import spatial
 import scipy.stats as sp
+
 """
+
+import time
 import mplhep as hep
 plt.style.use(hep.style.ROOT)
 import uproot as uproot4
@@ -28,7 +31,10 @@ from sklearn.mixture import GaussianMixture#clustering
 from sklearn.cluster import DBSCAN#clustering
 from scipy.stats import binned_statistic
 from scipy.stats import halfnorm
-from sklearn.cluster import KMeans#clustering
+from shapely.geometry import Point, Polygon
+from sklearn.cluster import Birch
+
+
 
 
 
@@ -74,6 +80,8 @@ def getData(fname="", procName="Events"):
                                         }),
                         "st23":ak.zip({
                                       "ntrack23":   kn_dict_ak1["n_st23tracklets"],
+                                      "Cal_x":   kn_dict_ak1["st23tracklet_x_CAL"],
+                                      "Cal_y":   kn_dict_ak1["st23tracklet_y_CAL"],
                                         })
                        }, depth_limit=1)
     return kn_events
@@ -142,11 +150,66 @@ def emcal_byevent(dq_events,evtNum):
     emcal_edep = emcal_hits.edep/sfc
     return emcal_x, emcal_y, emcal_edep
 
+#Clustering return multi cluster xyeng-------------------------------------------------------------------------------------------------------
+def label_clus_eng(label, eng_eve):#return sorted labels by decreasing order of energy
+    unique_labels = np.unique(label)
+    cluster_energy = np.zeros(len(unique_labels), dtype=np.int64)
+    for i in range(len(label)):
+        cluster_energy[label[i]] += eng_eve[i]
+    sorted_labels = unique_labels[np.argsort(cluster_energy)[::-1]]
+    return sorted_labels
 #--------------------------------------------------------------------------------------------------------------------------------------------
-def find_lead_clus(label, eve_num, eng_eve):
+def Clustering_multi(file):
+    (x_eve, y_eve, eng_eve)=emcal_bytuple(file)
+    labels=[]#2D, for all hits
+    centers=[]
+    labels_decrease=[]#for each event
+    for i in range(len(eng_eve)):
+        coordinate=np.column_stack((x_eve[i],y_eve[i]))
+        try:
+            kmeans = KMeans(n_clusters=2, random_state=0, n_init="auto").fit(coordinate)#hardcode
+            labels.append(kmeans.labels_)
+            labels_decrease.append(label_clus_eng(kmeans.labels_, eng_eve[i]))
+            centers.append(kmeans.cluster_centers_)   
+        except:
+            labels.append([0])
+            labels_decrease.append([0])
+            centers.append(flatten(coordinate)) 
+    return labels, labels_decrease, x_eve, y_eve, eng_eve, centers
+#--------------------------------------------------------------------------------------------------------------------------------------------
+def cluss_coord(file):#for each cluster, [[x],[y],[eng], center]
+    (labels, labels_decrease, x_tup, y_tup, eng_tup, centers_clus)=Clustering_multi(file)
+    coord=[]#designed to be 4D(evt-clsuter(decreasing order)-list of xyz- xyz))
+    for i in range(len(labels)):
+        evt_coord=[]
+        for item in labels_decrease[i]:
+            
+            try:
+                indices = np.argwhere(labels[i]==item)
+                xvals = flatten(x_tup[i][indices])
+                yvals = flatten(y_tup[i][indices])
+                energies = flatten(eng_tup[i][indices])
+                emax_i=energies.index(max(energies))
+                emax_center=[xvals[emax_i], yvals[emax_i]]
+            except:
+                emax_i=0
+                xvals = x_tup[i][emax_i]
+                yvals = y_tup[i][emax_i]
+                energies = eng_tup[i][emax_i]
+                emax_center=[xvals, yvals]
+
+            
+            kmeans_center=centers_clus[i][item]
+            evt_coord.append([xvals, yvals, energies, emax_center, kmeans_center])#cluster coord in []
+        coord.append(evt_coord)
+    return coord
+#--------------------------------------------------------------------------------------------------------------------------------------------
+    
+#Clustering return leading cluster xyeng-----------------------------------------------------------------------------------------------------
+def find_lead_clus(label, eng_eve):#only return the label for the leading cluster
     count=[0]*(len(np.unique(label)))
     for i in range(len(label)):
-        count[label[i]]+=eng_eve[eve_num][i]
+        count[label[i]]+=eng_eve[i]
     return np.argmax(count)
 #--------------------------------------------------------------------------------------------------------------------------------------------
 def Clustering_tuple(file):
@@ -160,12 +223,12 @@ def Clustering_tuple(file):
         brc.fit(coordinate)
         label=brc.predict(coordinate)
         labels.append(label)
-        lead_nums.append(find_lead_clus(label, i, eng_eve))
+        lead_nums.append(find_lead_clus(label, eng_eve[i]))
         num_clus.append(max(label)+1)
 
     return labels, lead_nums, x_eve, y_eve, eng_eve, num_clus
 #--------------------------------------------------------------------------------------------------------------------------------------------
-def find_coord(file):#return the information of leading cluster
+def lead_coord(file):#return the information of leading cluster
     (labels, lead_nums, x_eve, y_eve, eng_eve, num_clus)=Clustering_tuple(file)
     new_x=[]
     new_y=[]
@@ -186,7 +249,7 @@ def find_coord(file):#return the information of leading cluster
             
 #--------------------------------------------------------------------------------------------------------------------------------------------
 def gen_wew(file):
-    (x_eve, y_eve, eng_eve)=find_coord(file)
+    (x_eve, y_eve, eng_eve)=lead_coord(file)
     wew_x = []
     wew_y = []
     for i in range(len(eng_eve)):
@@ -208,7 +271,7 @@ def gen_wew(file):
             
 #--------------------------------------------------------------------------------------------------------------------------------------------
 def gen_wid(file):
-    (x_eve, y_eve, eng_eve)=find_coord(file)
+    (x_eve, y_eve, eng_eve)=lead_coord(file)
     wid_x = []
     wid_y = []
     for i in range(len(x_eve)):
@@ -231,7 +294,7 @@ def gen_wid(file):
 def gen_skew(file):
     skew_x=[]
     skew_y=[]
-    (x,y,eng)=find_coord(file)
+    (x,y,eng)=lead_coord(file)
     for i in range(len(eng)):
         skew_x.append(sp.skew(x[i]))
         skew_y.append(sp.skew(y[i]))
@@ -241,7 +304,7 @@ def gen_skew(file):
 def gen_kurt(file):
     kurt_x=[]
     kurt_y=[]
-    (x,y,eng)=find_coord(file)
+    (x,y,eng)=lead_coord(file)
     for i in range(len(eng)):
         kurt_x.append(sp.skew(x[i]))
         kurt_y.append(sp.skew(y[i]))
@@ -254,38 +317,31 @@ def ntrack_st23(file):
 #--------------------------------------------------------------------------------------------------------------------------------------------
 #finding the energy weighted and geometric center
 def gen_center(file):
-    output=find_coord(file)
+    output=lead_coord(file)
     x_eve=output[0]
     y_eve=output[1]
     eng_eve=output[2]
     wew_x = []
     wew_y = []
-    wid_x = []
-    wid_y = []
+    #wid_x = []
+    #wid_y = []
     for i in range(len(eng_eve)):
         eng_tot=sum(eng_eve[i])
         wew_x.append(np.dot(x_eve[i], eng_eve[i])/eng_tot)
         wew_y.append(np.dot(y_eve[i], eng_eve[i])/eng_tot)
-        try:wid_x.append(sum(x_eve[i])/len(x_eve[i]))
-        except: wid_x.append([])
-        try:wid_y.append(sum(y_eve[i])/len(y_eve[i]))
-        except: wid_y.append([])
-    return wew_x, wew_y, wid_x, wid_y
-            
-            
+        #try:wid_x.append(sum(x_eve[i])/len(x_eve[i]))
+        #except: wid_x.append([])
+        #try:wid_y.append(sum(y_eve[i])/len(y_eve[i]))
+        #except: wid_y.append([])
+    return wew_x, wew_y   
 #--------------------------------------------------------------------------------------------------------------------------------------------
 def track_bytuple(file):
-    #It returns awkward.highlevel.Array, and each event has an array[]. 
-    #Since some event do not have valid track information, and ak array doesn't affact calculation
-    # so still keep the datatype here
-    #tuple(np.concatenate(track_x, axis=0)), gives a perfect tuple, none entry been removed and length shrink
     dq_events = getData(file,"Events")
-    track_x = dq_events["track"].x
-    track_y = dq_events["track"].y
+    track_x = dq_events["track"].x.tolist()
+    track_y = dq_events["track"].y.tolist()
     return track_x, track_y
-
 #--------------------------------------------------------------------------------------------------------------------------------------------
-def matchup(file):
+def track_cal(file):
     output1 = gen_center(file)
     output2 = valid_track(file)# <Array [] type='0 * float32'>, some entries are empty
     wew_x = output1[0]
@@ -300,9 +356,6 @@ def matchup(file):
     return np.hstack(diff_x), np.hstack(diff_y)
 #--------------------------------------------------------------------------------------------------------------------------------------------
 def count(list1, x1, x2):
-    # Using list comprehension to filter elements within the range
-    # and returning the length of the resulting list
-
     return len([x for x in list1 if x >= x1 and x <= x2])
 #--------------------------------------------------------------------------------------------------------------------------------------------
 def flatten(l):#unfold tuple, decrease by 1D
@@ -327,8 +380,7 @@ def valid_track(file):
     track_x = dq_events["track"].x.tolist()
     track_y = dq_events["track"].y.tolist()
     p=dq_events["track"].pz.tolist()
-
-    x1,y1,x2,y2=gen_center(file)
+    x1,y1=gen_center(file)
 
     #fill empty with -1, check multi points
     indecies=[]
@@ -350,25 +402,6 @@ def valid_track(file):
             p[indecies[i]]=p[indecies[i]][index]
     return track_x, track_y, p
 #--------------------------------------------------------------------------------------------------------------------------------------------
-def h4_sort(list1):#hard coded for detID 41-46
-    indices = []
-    values = []
-    for index, value in enumerate(list1):
-        if 41 <= value <= 46:
-            indices.append(index)
-            values.append(value)
-    return indices, values
-# --------------------------------------------------------------------------------------------------------------------------------------------
-def extrpl_h4(x,y,z,px,py,pz,ID):#41-44 are x. 45, 46 are y.
-    IDpos={41: 2130.27, 42: 2146.45, 43:2200.44 , 44:2216.62 , 45:2251.71 , 46: 2234.29}
-    h4_x = x+(px/pz)*(IDpos[ID]-z)
-    h4_y = y+(py/pz)*(IDpos[ID]-z)
-    return h4_x, h4_y
-#--------------------------------------------------------------------------------------------------------------------------------------------
-def get_h4_st3(x1, x2, x3, x4, x5, x6, x7):
-    all_lists = [x2, x3, x4, x5, x6, x7]
-    result = [[lst[index] for index in x1 if 0 <= index < len(lst)] for lst in all_lists]
-    return result
 
 #--------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -389,3 +422,16 @@ def get_h4_st3(x1, x2, x3, x4, x5, x6, x7):
 #--------------------------------------------------------------------------------------------------------------------------------------------
 
 #--------------------------------------------------------------------------------------------------------------------------------------------
+
+#--------------------------------------------------------------------------------------------------------------------------------------------
+
+#--------------------------------------------------------------------------------------------------------------------------------------------
+
+#--------------------------------------------------------------------------------------------------------------------------------------------
+
+#--------------------------------------------------------------------------------------------------------------------------------------------
+
+#--------------------------------------------------------------------------------------------------------------------------------------------
+
+#--------------------------------------------------------------------------------------------------------------------------------------------
+
